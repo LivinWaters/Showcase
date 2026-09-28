@@ -36,13 +36,86 @@ internal static class Program
 
         Console.OutputEncoding = Encoding.UTF8;
         Console.WriteLine("=== BigInt benchmark: BigIntChunked / BigIntUtils / NumberDisplay / NumberDisplayScales / StringInt ===");
-        Stopwatch runSw = Stopwatch.StartNew();
         if (_diagnosticMode)
         {
             PrintEnvironmentHeader();
         }
         Console.WriteLine();
 
+        // ─── Damage scaling interaction (before benchmarks, so alloc/CPU are measured with these) ────────────────
+        Console.Write("Enter base damage min (e.g. 10): ");
+        string? minInput = Console.ReadLine();
+        Console.Write("Enter base damage max (e.g. 20): ");
+        string? maxInput = Console.ReadLine();
+        Console.Write("Enter attack value (e.g. 100): ");
+        string? attackInput = Console.ReadLine();
+        Console.Write("Enter base attack speed (weapon RateOfFire, e.g. 1.0): ");
+        string? rateInput = Console.ReadLine();
+        Console.Write("Enter dexterity (0-1000, e.g. 50): ");
+        string? dexInput = Console.ReadLine();
+
+        // Parse BigInt with tower fallback (BigExp for 1gp / 1e1e100)
+        BigInteger baseMin, baseMax, attack;
+        VortexClient.Core.Numbers.BigExp baseMinExp, baseMaxExp, attackExp;
+        bool isTower = false;
+        string ParseBIExp(string s, BigInteger defBI, VortexClient.Core.Numbers.BigExp defExp, out BigInteger bi, out VortexClient.Core.Numbers.BigExp exp, ref bool towerFlag)
+        {
+            string t = s?.Trim() ?? "";
+            if (string.IsNullOrWhiteSpace(t)) { bi = defBI; exp = defExp; return t; }
+            if (BigInteger.TryParse(t, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) { bi = v; exp = VortexClient.Core.Numbers.BigExp.Parse(t); return t; }
+            if (VortexClient.Core.Numbers.BigExp.TryParse(t, out var e)) { bi = BigInteger.Zero; exp = e; towerFlag = true; return t; }
+            // try BigIntUtils suffix like 1M
+            try { var w = BigIntUtils.ParseBigWithSuffix(t, defBI); bi = w; exp = VortexClient.Core.Numbers.BigExp.Parse(w.ToString()); return t; } catch {}
+            bi = defBI; exp = defExp; return t;
+        }
+        bool towerFlag = false;
+        ParseBIExp(minInput, new BigInteger(10), VortexClient.Core.Numbers.BigExp.Parse("10"), out baseMin, out baseMinExp, ref towerFlag);
+        ParseBIExp(maxInput, new BigInteger(20), VortexClient.Core.Numbers.BigExp.Parse("20"), out baseMax, out baseMaxExp, ref towerFlag);
+        ParseBIExp(attackInput, new BigInteger(100), VortexClient.Core.Numbers.BigExp.Parse("100"), out attack, out attackExp, ref towerFlag);
+        isTower = towerFlag || (minInput?.IndexOf("gp", StringComparison.OrdinalIgnoreCase) >= 0) || (maxInput?.IndexOf("gp", StringComparison.OrdinalIgnoreCase) >= 0) || (attackInput?.IndexOf("gp", StringComparison.OrdinalIgnoreCase) >= 0);
+        double rateOfFire = string.IsNullOrWhiteSpace(rateInput) ? 1.0 : double.Parse(rateInput.Trim(), CultureInfo.InvariantCulture);
+        double dex = string.IsNullOrWhiteSpace(dexInput) ? 50.0 : double.Parse(dexInput.Trim(), CultureInfo.InvariantCulture);
+
+        BigInteger dmgMin = baseMin * attack / 100;
+        BigInteger dmgMax = baseMax * attack / 100;
+        if (dmgMax < dmgMin) dmgMax = dmgMin;
+        // Tower path via BigExp (handles 1gp = 1e1e100 beyond BigInteger)
+        VortexClient.Core.Numbers.BigExp dmgMinExp = VortexClient.Core.Numbers.BigExp.Multiply(baseMinExp, attackExp);
+        dmgMinExp = VortexClient.Core.Numbers.BigExp.DivideByInt(dmgMinExp, 100);
+        VortexClient.Core.Numbers.BigExp dmgMaxExp = VortexClient.Core.Numbers.BigExp.Multiply(baseMaxExp, attackExp);
+        dmgMaxExp = VortexClient.Core.Numbers.BigExp.DivideByInt(dmgMaxExp, 100);
+        if (dmgMaxExp.CompareTo(dmgMinExp) < 0) dmgMaxExp = dmgMinExp;
+        // Mirrors Player.as attackFrequency(): MIN 0.0015 + (min(dex,1000)/75)*(MAX-MIN), period = 1/freq * 1/RateOfFire
+        const double MIN_ATTACK_FREQ = 0.0015;
+        const double MAX_ATTACK_FREQ = 0.008;
+        double effectiveDex = Math.Min(dex, 1000.0);
+        double attackFreq = MIN_ATTACK_FREQ + (effectiveDex / 75.0) * (MAX_ATTACK_FREQ - MIN_ATTACK_FREQ);
+        double attackPeriodMs = (1.0 / attackFreq) * (1.0 / Math.Max(0.01, rateOfFire));
+        double attacksPerSecond = 1000.0 / attackPeriodMs; // = attackFreq * rateOfFire * 1000
+
+        BigInteger avgDamage = (dmgMin + dmgMax) / 2;
+        double avgD = BigIntUtils.ToDoubleLossy(avgDamage);
+        double expectedDps = avgD * attacksPerSecond;
+        string dpsDisplay = double.IsInfinity(avgD) || double.IsInfinity(expectedDps) || double.IsNaN(expectedDps)
+            ? $"{BigIntUtils.FormatAbbreviated(avgDamage * new BigInteger((long)Math.Max(1, attacksPerSecond)))} (approx BigInt)"
+            : $"{expectedDps:F2}";
+        // Tower DPS via BigExp (handles 1gp scale)
+        VortexClient.Core.Numbers.BigExp avgExp = VortexClient.Core.Numbers.BigExp.DivideByInt(VortexClient.Core.Numbers.BigExp.Add(dmgMinExp, dmgMaxExp), 2);
+        VortexClient.Core.Numbers.BigExp dpsExp = VortexClient.Core.Numbers.BigExp.Multiply(avgExp, VortexClient.Core.Numbers.BigExp.Parse(attacksPerSecond.ToString("R", CultureInfo.InvariantCulture)));
+
+        if (isTower)
+        {
+            Console.WriteLine($"Computed damage range [BigInt]: N/A (tower input beyond BigInteger)");
+            Console.WriteLine($"Computed damage range [Tower BigExp]: {dmgMinExp.ToAbbreviated()} - {dmgMaxExp.ToAbbreviated()} (base {baseMinExp.ToAbbreviated()}-{baseMaxExp.ToAbbreviated()} * attack {attackExp.ToAbbreviated()}/100) sci {dmgMinExp.ToScientific(2)} - {dmgMaxExp.ToScientific(2)}");
+        }
+        else Console.WriteLine($"Computed damage range [BigInt]: {dmgMin} - {dmgMax} (base {baseMin}-{baseMax} * attack {attack}/100)");
+        Console.WriteLine($"Attack freq (dex {dex} -> {effectiveDex}/75): {attackFreq:F6} per ms, RateOfFire {rateOfFire:F2}, period {attackPeriodMs:F2} ms");
+        Console.WriteLine($"Attacks per second: {attacksPerSecond:F3} att/s");
+        if (isTower) Console.WriteLine($"Expected DPS [Tower]: {dpsExp.ToAbbreviated()} sci {dpsExp.ToScientific(2)} (avg {avgExp.ToAbbreviated()} * {attacksPerSecond:F3})");
+        else Console.WriteLine($"Expected DPS [BigInt]: {dpsDisplay} (avg {avgDamage} * {attacksPerSecond:F3})");
+        Console.WriteLine();
+
+        Stopwatch runSw = Stopwatch.StartNew();
         string[] data = BuildTestData();
         foreach (string s in data) Track(s);
 
@@ -150,20 +223,46 @@ internal static class Program
 
         Console.WriteLine();
         Console.WriteLine("[Damage Roll (game Shoot.cs logic)]");
-        BigInteger dmgMinT = BigInteger.Parse("1200", CultureInfo.InvariantCulture);
-        BigInteger dmgMaxT = BigInteger.Parse("1500", CultureInfo.InvariantCulture);
+        // User-scaled damage as BigInt (entered before benchmarks, so alloc/CPU are measured with these values)
+        BigInteger dmgMinT = dmgMin;
+        BigInteger dmgMaxT = dmgMax;
         BigInteger dmgMin100 = BigInteger.Parse("5" + new string('0', 99), CultureInfo.InvariantCulture);
         BigInteger dmgMax100 = dmgMin100 + 3000;
         BigInteger dmgMin500 = BigInteger.Parse("1" + new string('0', 499), CultureInfo.InvariantCulture);
         BigInteger dmgMax500 = dmgMin500 + 3000;
-        Bench("Roll damage 1k-1.5k (typical)", Its(100000),
+        BigInteger avgT = (dmgMinT + dmgMaxT) / 2;
+        double avgTd = BigIntUtils.ToDoubleLossy(avgT);
+        double dpsT = avgTd * attacksPerSecond;
+        string dpsTStr = double.IsInfinity(avgTd) || double.IsInfinity(dpsT) ? $"{BigIntUtils.FormatAbbreviated(avgT * new BigInteger((long)Math.Max(1, attacksPerSecond)))} (approx BigInt)" : $"{dpsT:F2}";
+        if (isTower) Console.WriteLine($"  Tower damage {dmgMinExp.ToAbbreviated()} - {dmgMaxExp.ToAbbreviated()} sci {dmgMinExp.ToScientific(2)} - {dmgMaxExp.ToScientific(2)} avg {avgExp.ToAbbreviated()} towerDPS {dpsExp.ToAbbreviated()} sci {dpsExp.ToScientific(2)} (base {baseMinExp.ToAbbreviated()}-{baseMaxExp.ToAbbreviated()} * attack {attackExp.ToAbbreviated()}/100, baseAPS {rateOfFire:F2} * dex {dex} -> {attacksPerSecond:F3} att/s)");
+        else Console.WriteLine($"  Using user BigInt damage {dmgMinT} - {dmgMaxT} (base {baseMin}-{baseMax} * attack {attack}/100), baseAPS {rateOfFire:F2} * dex {dex} (freq {attackFreq:F6}, period {attackPeriodMs:F1}ms) -> {attacksPerSecond:F3} att/s, DPS {dpsTStr} (avg {avgT})");
+        Bench("Roll damage (user scaled)", Its(100000),
             i => RollDamage(Rng, dmgMinT, dmgMaxT, weak: false));
         Bench("Roll damage 100-digit + small span (Weak)", Its(50000),
             i => RollDamage(Rng, dmgMin100, dmgMax100, weak: true));
         Bench("Roll damage 500-digit + small span", Its(20000),
             i => RollDamage(Rng, dmgMin500, dmgMax500, weak: false));
-        Bench("BigIntRandomBelow (span 3000)", Its(200000),
+        Bench("BigIntRandomBelow (user span)", Its(200000),
             i => BigIntRandomBelow(Rng, dmgMaxT - dmgMinT));
+        Bench("DPS calc (BigInt rolls, att/s + avg)", Its(5),
+            i =>
+            {
+                int iterations = 100000;
+                BigInteger totalDamage = BigInteger.Zero;
+                for (int j = 0; j < iterations; j++) totalDamage += RollDamage(Rng, dmgMinT, dmgMaxT, weak: false);
+                BigInteger avg = totalDamage / iterations;
+                double avgD2 = BigIntUtils.ToDoubleLossy(avg);
+                double dps = avgD2 * attacksPerSecond;
+                string dpsStr2 = double.IsInfinity(avgD2) || double.IsInfinity(dps) ? $"{BigIntUtils.FormatAbbreviated(avg * new BigInteger((long)Math.Max(1, attacksPerSecond)))} (approx BigInt)" : $"{dps:F2}";
+                if (i == 0) Console.WriteLine($"  DPS sample: avg {avg} ({avgD2:F2}) * {attacksPerSecond:F3} att/s = {dpsStr2}");
+            });
+        if (isTower)
+        {
+            Bench("Tower damage scale (BigExp base*attack/100)", Its(200000),
+                i => VortexClient.Core.Numbers.BigExp.DivideByInt(VortexClient.Core.Numbers.BigExp.Multiply(baseMinExp, attackExp), 100));
+            Bench("Tower DPS (BigExp avg*att/s)", Its(100000),
+                i => VortexClient.Core.Numbers.BigExp.Multiply(avgExp, VortexClient.Core.Numbers.BigExp.Parse(attacksPerSecond.ToString("R", CultureInfo.InvariantCulture))));
+        }
 
         Console.WriteLine("[StringInt]");
         Bench("Parse (string → StringInt)", Its(100000),
@@ -200,6 +299,17 @@ internal static class Program
 
         Console.WriteLine();
         Console.WriteLine($"Total benchmark run time: {runSw.Elapsed.TotalSeconds:F2} s");
+
+        // ─── 1gp round-trip check ──────────────────────────────────────
+        var gpExp = VortexClient.Core.Numbers.BigExp.Parse("1gp");
+        string gpSci = gpExp.ToScientific();
+        string gpAbbr = gpExp.ToAbbreviated();
+        // Round-trip: abbreviate the parsed 1gp back via FormatAbbreviated using the BigInt
+        BigInteger gpBig = BigIntUtils.ParseBigWithSuffix(gpAbbr, BigInteger.Zero);
+        string gpRounded = BigIntUtils.FormatAbbreviated(gpBig);
+        Console.WriteLine($"1gp round-trip: sci={gpSci} abbr={gpAbbr} reformat={gpRounded}");
+
+        Console.WriteLine();
         Console.WriteLine("Press Enter to close...");
         Console.ReadLine();
     }

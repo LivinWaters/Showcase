@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("BigIntBench")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c86545c20717471fcfc429dee7a03192457d7476")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c67c2623f2c2a43ae3e82f707b9f9144e37d0178")]
 [assembly: System.Reflection.AssemblyProductAttribute("BigIntBench")]
 [assembly: System.Reflection.AssemblyTitleAttribute("BigIntBench")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

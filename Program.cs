@@ -377,7 +377,7 @@ internal static class Program
         Console.WriteLine($"{name,-48}{iterations,10:N0}{ms,12:N2}{iterations / (ms / 1000.0),14:N0}{allocMb,10:F2}{bytesPerOp,10:N0}{cpuPct,8:F1}{ramDeltaMb,10:F2}");
         if (_diagnosticMode)
         {
-            Console.WriteLine($"  [Allocation proof] {name}: thread alloc={allocBytes} bytes; total alloc={totalAllocBytes} bytes; workload ticks={ticks:F3} ms; throughput-op={Math.Max(1, iterations) / Math.Max(1e-6, ms / 1000.0):N0} ops/sec");
+            Console.WriteLine($"  [Allocation proof] {name}: thread alloc={allocBytes} bytes; total alloc={totalAllocBytes} bytes; workload ticks={ticks:F3} ms; throughput-op={Math.Max(1, iterations) / (ticks / 1000.0):N0} ops/s");
             if (gc0Delta != 0 || gc1Delta != 0 || gc2Delta != 0)
             {
                 Console.WriteLine($"  [GC diagnostic] {name}: generations -> gen0={gc0Delta}, gen1={gc1Delta}, gen2={gc2Delta}; alloc={allocBytes} bytes; ticks={ticks:F3} ms");
@@ -443,8 +443,9 @@ internal static class Program
         double tripsPerSec = towerStats.ElapsedMilliseconds > 0
             ? towerStats.Iterations / (towerStats.ElapsedMilliseconds / 1000.0)
             : 0.0;
-        Console.WriteLine($"Client/server wire RT: iter={towerStats.Iterations:N0}; wire bytes={towerStats.TotalBytes:N0}; payload/RT={towerStats.PayloadBytes:N0} B; {towerStats.ElapsedMilliseconds:N2} ms; {tripsPerSec:N0} RT/s; throughput={towerStats.MegabytesPerSecond:F2} MB/s");
-        Console.WriteLine($"Round-trip chain: client sends tower (1e1e100 / 1gp) -> server computes lowest abbr {towerStats.PayloadMode} -> client re-parses. Verified round-trips: {towerStats.PayloadModeVerified}/{towerStats.Iterations}");
+        Console.WriteLine($"Client/server wire RT: iter={towerStats.Iterations:N0}; wire bytes={towerStats.TotalBytes:N0}; payload/RT={towerStats.PayloadBytes:N0} B; {towerStats.ElapsedMilliseconds:N2} ms; {tripsPerSec:N0} RT/s");
+        Console.WriteLine($"Round-trip chain: client sends tower (1e1e100 / 1gp) -> server computes lowest abbr {towerStats.PayloadMode} -> client re-parses. Verified round-trips: {towerStats.PayloadModeVerified:N0}/{towerStats.Iterations:N0}");
+        Console.WriteLine($"Lowest tower envelope: {towerStats.PayloadMode}");
     }
 
     private static async Task<LoopbackSocketStats> RunTcpTowerLowestRoundTripAsync(int iterations)
@@ -730,6 +731,7 @@ internal static class Program
         Console.WriteLine();
         Console.WriteLine("=== Highest / Lowest hybrid samples + tower envelope ===");
         Console.WriteLine("These are benchmark sample views that are now chained as a single abbreviation round-trip envelope.");
+        Console.WriteLine("Concrete materialized range (actual BigInteger values):");
         PrintMinMax("Highest", _max);
         PrintMinMax("Lowest", _min);
 
@@ -739,6 +741,8 @@ internal static class Program
             var expValue = VortexClient.Core.Numbers.BigExp.Parse(towerTxt);
             string sci = expValue.ToScientific();
             string abbr = expValue.ToAbbreviated();
+            Console.WriteLine();
+            Console.WriteLine("Symbolic tower ceiling: 1gp / 1e1e100 (BigExp exponent tower, never materialized as literal digits)");
             Console.WriteLine($"Tower input : {towerTxt}");
             Console.WriteLine($"Tower sci   : {sci}");
             Console.WriteLine($"Tower abbr  : {abbr}");
@@ -748,6 +752,8 @@ internal static class Program
             BigInteger lowestParsed = BigIntUtils.ParseBigWithSuffix(lowestServer, BigInteger.Zero);
             string lowestServerRoundTrip = BigIntUtils.FormatAbbreviated(lowestParsed);
             var towerParse = VortexClient.Core.Numbers.BigExp.Parse(abbr);
+            Console.WriteLine("Ceiling→floor→ceiling cycle: tower-abbr=" + abbr + " -> BigExp.Parse -> " + towerParse.ToScientific() + " -> concrete floor=" + lowestServerRoundTrip + " (client=" + lowestClient + ")");
+            Console.WriteLine("Ceiling round-trip verification: CompareTo(original tower, parsed tower) = " + expValue.CompareTo(towerParse).ToString(CultureInfo.InvariantCulture));
             Console.WriteLine("Round-trip : tower-abbr=" + abbr + " -> BigExp.Parse -> " + towerParse.ToScientific() + " -> lowest-abbr=" + lowestServerRoundTrip + " (client=" + lowestClient + ")");
         }
         catch (Exception ex)
@@ -923,6 +929,11 @@ internal static class Program
             VortexClient.Core.Numbers.BigExp.Parse("1e1e100").ToAbbreviated() == "1gp"
             && VortexClient.Core.Numbers.BigExp.TryParse("1gp", out var gpExp)
             && gpExp.CompareTo(VortexClient.Core.Numbers.BigExp.Parse("1e1e100")) == 0);
+        Observe("BigExp tower ceiling round-trips across symbolic ceiling/floor cycle",
+            VortexClient.Core.Numbers.BigExp.Parse("1e1e100") is var tower
+            && tower.ToAbbreviated() == "1gp"
+            && tower.CompareTo(VortexClient.Core.Numbers.BigExp.Parse("1gp")) == 0
+            && BigIntUtils.ParseBigWithSuffix(BigIntUtils.FormatAbbreviated(_min), BigInteger.Zero).CompareTo(_min) == 0);
         Observe("DamageRoll: 10k rolls stay within [min, max] (typical, big, weak)",
             RollsStayInRange(new Random(1), new BigInteger(1200), new BigInteger(1500), weak: false, 10000)
             && RollsStayInRange(new Random(2), FindDamageMin(), FindDamageMin() + 3000, weak: true, 5000));
@@ -953,7 +964,12 @@ internal static class Program
             new string('9', 250),
             "1" + new string('0', 462),                   // YZCePi tier
             new string('9', 500),                         // beyond all scales
-            "-" + new string('9', 120),
+            "-" + new string('9', 500),
+            "-" + "1" + new string('0', 462),
+            "-" + "123" + new string('0', 347),
+            "-" + new string('9', 100),
+            "-" + new string('9', 50),
+            "-" + new string('1', 1) + new string('0', 33),
             "31415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679"
         };
 

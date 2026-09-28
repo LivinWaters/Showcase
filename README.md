@@ -1,13 +1,13 @@
-﻿# Shifted BigInts - Code Showcase
+# Shifted BigInts - Code Showcase
 
 Extracted arrow-notation scaling arithmetic and the supporting short-suffix number
-types from **Absentia**. The gameplay
+types from **Absentina**. The gameplay
 amounts in that game pass through this code whenever an item with a big "value",
 "feed power", or "fame" number is rendered to the client, so these classes sit in
 the hot path of every economy-based packet.
 
 Every source file below is a verbatim copy of the production implementation,
-again apart from the documented branch-level tweaks. The public API is exactly
+apart from the documented branch-level tweaks. The public API is exactly
 what the game uses.
 
 ## Production Path Mapping
@@ -42,9 +42,8 @@ what the game uses.
 
 ## Running the benchmark
 
-```
 dotnet run -c Release
-```
+
 
 Requires the .NET 10 SDK. The console app links the client and server halves
 (that's why `BigIntUtils.cs` carries the extra `using VortexClient.Core.Numbers;`,
@@ -56,25 +55,27 @@ see the delta note above) and runs:
   bytes/op, CPU %, and RAM delta for each of the five exercised files:
   `BigIntChunked`, `BigIntUtils`, `NumberDisplay`, `NumberDisplayScales`,
   `StringInt` (e.g. `FormatAbbreviated` on a 500-digit `BigInteger`, the
-  `FormattedNumberCache` hit path at ~179M ops/sec, big-string add/sub/mul/div).
+  `FormattedNumberCache` hit path at ~199M ops/sec, big-string add/sub/mul/div,
+  and surgical hot paths like damage rolls running at over 23M ops/sec with zero allocations).
 - **Process resource summary** — CPU time, working set / private memory, managed
   heap, plus the raw and abbreviated highest/lowest numbers and a
-  tower-abbr round-trip check (`BigExp.Parse` -> abbreviated form ->
-  back), which is what makes the suffix table lockstep testable.
+  tower envelope round-trip check (`1e1e100` tower input mapped to `1gp` through a chained ladder down to negative octo-vigintillion tiers), which is what makes the suffix table lockstep testable.
 - Diagnostics: pass `--diag` / `--diagnostic` / `--trace`, or set
   `BIGINTBENCH_DIAGNOSTIC=1`.
 
 A prior run is saved in `benchmark-output.txt` (UTF-16; 14/14 sanity checks
-passed, total run time ~1.1 s on 12 logical processors).
+passed, total run time ~1.5 s on 12 logical processors).
 
 ## What's interesting
 
 - **Short suffixes go farther than the base game.** The production
-  `AbbrevScales` table goes out to 10^462 (`YZCePi`), versus the vanilla
-  ~10^18 ("Qd") the unmodified client hard-codes.
+  `AbbrevScales` table goes out to $10^{10^{100}}$ (`gp`), versus the vanilla
+  ~2.14x10^9 ("2.14 Billion or the max int32 integer") the unmodified client hard-codes.
 - **Exponent delta is the key.** A number >= 10^exponent gets the suffix shown;
   the table is the contract trusted by both `client` and `server`, and it has to
   stay in lockstep with what the game writes to the ledger.
 - **One implementation, two halves.** The `FNA Client Side` (client render) and
   `Server Side` (server persistence) versions are literally the same real
   one -- checked byte-for-byte against the production repo.
+
+**Demetri Silver** | [dvsilver1198@hotmail.com](mailto:dvsilver1198@hotmail.com) | [View Resume](Resume.pdf)

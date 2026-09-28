@@ -427,3 +427,10 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+/obj
+*.json
+*.exe
+*.dll
+*.pdb
+*.json
+*.props

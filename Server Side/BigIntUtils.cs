@@ -13,6 +13,7 @@ namespace common
     public static partial class BigIntUtils
     {
         private static readonly BigInteger[] Pow10 = BuildPow10();
+        private static readonly double[] Pow10Double = BuildPow10Double();
 
         private static BigInteger[] BuildPow10()
         {
@@ -20,6 +21,14 @@ namespace common
             var v = BigInteger.One;
             arr[0] = v;
             for (int i = 1; i < arr.Length; i++) { v *= 10; arr[i] = v; }
+            return arr;
+        }
+
+        private static double[] BuildPow10Double()
+        {
+            var arr = new double[309];
+            for (int i = 0; i < arr.Length; i++)
+                arr[i] = i == 0 ? 1.0 : arr[i - 1] * 10.0;
             return arr;
         }
 
@@ -83,7 +92,7 @@ namespace common
             if (v.IsZero)
                 return 0d;
 
-            // Fast path: small values convert directly with no string allocation.
+            // Fast path: small values convert directly with no allocation.
             if (v <= long.MaxValue && v >= long.MinValue)
                 return (double)(long)v;
             if (v.Sign > 0 && v <= ulong.MaxValue)
@@ -91,21 +100,39 @@ namespace common
 
             var sign = v.Sign < 0 ? -1d : 1d;
             var abs = BigInteger.Abs(v);
-            var digits = abs.ToString(CultureInfo.InvariantCulture);
 
-            // Largest finite IEEE-754 double has ~308 decimal exponent.
-            // Clamp instead of throwing when values exceed representable range.
-            if (digits.Length > 308)
+            // Estimate decimal digit count without ToString allocation.
+            // log10(2) ≈ 0.30103, so bits * 0.30103 ≈ digits.
+            int bitLen = (int)abs.GetBitLength();
+            int estDigits = (int)(bitLen * 0.3010299956639812d) + 1;
+
+            if (estDigits > 308)
                 return sign > 0 ? double.MaxValue : -double.MaxValue;
 
-            const int sigDigits = 16; // enough for double mantissa precision
-            var take = digits.Length > sigDigits ? sigDigits : digits.Length;
-            var head = digits.Substring(0, take);
-            if (!double.TryParse(head, NumberStyles.Integer, CultureInfo.InvariantCulture, out var mantissa))
-                return sign > 0 ? double.MaxValue : -double.MaxValue;
+            // Extract leading 17 digits by dividing down.
+            // 17 digits ensures we capture full double mantissa precision (53 bits ≈ 15.95 digits).
+            const int sigDigits = 17;
+            BigInteger divisor;
+            if (estDigits <= sigDigits)
+            {
+                // Small enough to convert directly.
+                divisor = BigInteger.One;
+            }
+            else
+            {
+                int shift = estDigits - sigDigits;
+                divisor = Pow10[shift];
+            }
 
-            var exp = digits.Length - take;
-            var result = mantissa * Math.Pow(10d, exp);
+            var mantissaBi = abs / divisor;
+            // mantissaBi fits in ulong (max 17 digits < 2^64 ≈ 1.84e19)
+            ulong mantissa = (ulong)mantissaBi;
+
+            int exp = estDigits - (mantissa == 0 ? 1 : (int)Math.Log10(mantissa) + 1);
+            if (exp >= Pow10Double.Length)
+                exp = Pow10Double.Length - 1;
+
+            double result = mantissa * Pow10Double[exp];
             if (double.IsNaN(result) || double.IsInfinity(result))
                 return sign > 0 ? double.MaxValue : -double.MaxValue;
             return sign * result;

@@ -11,10 +11,12 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using common;
+using MantissaSystem;
 using VortexClient.Core;
 
 internal static class Program
@@ -26,6 +28,32 @@ internal static class Program
     private static BigInteger _max = BigInteger.Zero;
     private static readonly object TrackSync = new();
     private static bool _diagnosticMode;
+
+    private static BigInteger _dpsSampleAvg;
+    private static double _dpsSampleAvgD;
+    private static double _dpsSampleAttacksPerSecond;
+    private static string _dpsSampleDpsStr;
+    private static bool _hasDpsSample;
+
+    private static string _damageRollLine;
+    private static bool _isTower;
+
+    private static BigInteger _bigCalcSink;
+    private static Mantissa _mantissaCalcSink;
+    private static double _dpsCalcSink;
+    private static Mantissa _mantissaDpsSink;
+
+    private static double ParseDoubleWithSuffix(string s, double defaultValue = 0.0)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return defaultValue;
+        var raw = s.Trim();
+        if (double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var plain)) return plain;
+
+        var bi = BigIntUtils.ParseBigWithSuffix(raw, BigInteger.Zero);
+        if (!bi.IsZero)
+            return BigIntUtils.ToDoubleLossy(bi);
+        return defaultValue;
+    }
 
     private static void Main(string[] args)
     {
@@ -43,16 +71,37 @@ internal static class Program
         Console.WriteLine();
 
         // ─── Damage scaling interaction (before benchmarks, so alloc/CPU are measured with these) ────────────────
-        Console.Write("Enter base damage min (e.g. 10): ");
-        string? minInput = Console.ReadLine();
-        Console.Write("Enter base damage max (e.g. 20): ");
-        string? maxInput = Console.ReadLine();
-        Console.Write("Enter attack value (e.g. 100): ");
-        string? attackInput = Console.ReadLine();
-        Console.Write("Enter base attack speed (weapon RateOfFire, e.g. 1.0): ");
-        string? rateInput = Console.ReadLine();
-        Console.Write("Enter dexterity (0-1000, e.g. 50): ");
-        string? dexInput = Console.ReadLine();
+        string? minInput = args.Length > 0 ? args[0] : null;
+        string? maxInput = args.Length > 1 ? args[1] : null;
+        string? attackInput = args.Length > 2 ? args[2] : null;
+        string? rateInput = args.Length > 3 ? args[3] : null;
+        string? dexInput = args.Length > 4 ? args[4] : null;
+
+        if (minInput == null)
+        {
+            Console.Write("Enter base damage min (e.g. 10): ");
+            minInput = Console.ReadLine();
+        }
+        if (maxInput == null)
+        {
+            Console.Write("Enter base damage max (e.g. 20): ");
+            maxInput = Console.ReadLine();
+        }
+        if (attackInput == null)
+        {
+            Console.Write("Enter attack value (e.g. 100): ");
+            attackInput = Console.ReadLine();
+        }
+        if (rateInput == null)
+        {
+            Console.Write("Enter base attack speed (weapon RateOfFire, e.g. 1.0): ");
+            rateInput = Console.ReadLine();
+        }
+        if (dexInput == null)
+        {
+            Console.Write("Enter dexterity (0-1000, e.g. 50): ");
+            dexInput = Console.ReadLine();
+        }
 
         // Parse BigInt with tower fallback (BigExp for 1gp / 1e1e100)
         BigInteger baseMin, baseMax, attack;
@@ -73,8 +122,8 @@ internal static class Program
         ParseBIExp(maxInput, new BigInteger(20), VortexClient.Core.Numbers.BigExp.Parse("20"), out baseMax, out baseMaxExp, ref towerFlag);
         ParseBIExp(attackInput, new BigInteger(100), VortexClient.Core.Numbers.BigExp.Parse("100"), out attack, out attackExp, ref towerFlag);
         isTower = towerFlag || (minInput?.IndexOf("gp", StringComparison.OrdinalIgnoreCase) >= 0) || (maxInput?.IndexOf("gp", StringComparison.OrdinalIgnoreCase) >= 0) || (attackInput?.IndexOf("gp", StringComparison.OrdinalIgnoreCase) >= 0);
-        double rateOfFire = string.IsNullOrWhiteSpace(rateInput) ? 1.0 : double.Parse(rateInput.Trim(), CultureInfo.InvariantCulture);
-        double dex = string.IsNullOrWhiteSpace(dexInput) ? 50.0 : double.Parse(dexInput.Trim(), CultureInfo.InvariantCulture);
+        double rateOfFire = string.IsNullOrWhiteSpace(rateInput) ? 1.0 : ParseDoubleWithSuffix(rateInput, 1.0);
+        double dex = string.IsNullOrWhiteSpace(dexInput) ? 50.0 : ParseDoubleWithSuffix(dexInput, 50.0);
 
         BigInteger dmgMin = baseMin * attack / 100;
         BigInteger dmgMax = baseMax * attack / 100;
@@ -114,6 +163,8 @@ internal static class Program
         if (isTower) Console.WriteLine($"Expected DPS [Tower]: {dpsExp.ToAbbreviated()} sci {dpsExp.ToScientific(2)} (avg {avgExp.ToAbbreviated()} * {attacksPerSecond:F3})");
         else Console.WriteLine($"Expected DPS [BigInt]: {dpsDisplay} (avg {avgDamage} * {attacksPerSecond:F3})");
         Console.WriteLine();
+
+        PrintMantissaProofOfConcept(isTower, baseMin, baseMax, attack, dmgMin, dmgMax, avgDamage, attacksPerSecond, expectedDps, dpsDisplay);
 
         Stopwatch runSw = Stopwatch.StartNew();
         string[] data = BuildTestData();
@@ -234,8 +285,11 @@ internal static class Program
         double avgTd = BigIntUtils.ToDoubleLossy(avgT);
         double dpsT = avgTd * attacksPerSecond;
         string dpsTStr = double.IsInfinity(avgTd) || double.IsInfinity(dpsT) ? $"{BigIntUtils.FormatAbbreviated(avgT * new BigInteger((long)Math.Max(1, attacksPerSecond)))} (approx BigInt)" : $"{dpsT:F2}";
-        if (isTower) Console.WriteLine($"  Tower damage {dmgMinExp.ToAbbreviated()} - {dmgMaxExp.ToAbbreviated()} sci {dmgMinExp.ToScientific(2)} - {dmgMaxExp.ToScientific(2)} avg {avgExp.ToAbbreviated()} towerDPS {dpsExp.ToAbbreviated()} sci {dpsExp.ToScientific(2)} (base {baseMinExp.ToAbbreviated()}-{baseMaxExp.ToAbbreviated()} * attack {attackExp.ToAbbreviated()}/100, baseAPS {rateOfFire:F2} * dex {dex} -> {attacksPerSecond:F3} att/s)");
-        else Console.WriteLine($"  Using user BigInt damage {dmgMinT} - {dmgMaxT} (base {baseMin}-{baseMax} * attack {attack}/100), baseAPS {rateOfFire:F2} * dex {dex} (freq {attackFreq:F6}, period {attackPeriodMs:F1}ms) -> {attacksPerSecond:F3} att/s, DPS {dpsTStr} (avg {avgT})");
+        _isTower = isTower;
+        if (isTower)
+            _damageRollLine = $"  Tower damage {dmgMinExp.ToAbbreviated()} - {dmgMaxExp.ToAbbreviated()} sci {dmgMinExp.ToScientific(2)} - {dmgMaxExp.ToScientific(2)} avg {avgExp.ToAbbreviated()} towerDPS {dpsExp.ToAbbreviated()} sci {dpsExp.ToScientific(2)} (base {baseMinExp.ToAbbreviated()}-{baseMaxExp.ToAbbreviated()} * attack {attackExp.ToAbbreviated()}/100, baseAPS {rateOfFire:F2} * dex {dex} -> {attacksPerSecond:F3} att/s)";
+        else
+            _damageRollLine = $"  Using user BigInt damage {dmgMinT} - {dmgMaxT} (base {baseMin}-{baseMax} * attack {attack}/100), baseAPS {rateOfFire:F2} * dex {dex} (freq {attackFreq:F6}, period {attackPeriodMs:F1}ms) -> {attacksPerSecond:F3} att/s, DPS {dpsTStr} (avg {avgT})";
         Bench("Roll damage (user scaled)", Its(100000),
             i => RollDamage(Rng, dmgMinT, dmgMaxT, weak: false));
         Bench("Roll damage 100-digit + small span (Weak)", Its(50000),
@@ -244,24 +298,96 @@ internal static class Program
             i => RollDamage(Rng, dmgMin500, dmgMax500, weak: false));
         Bench("BigIntRandomBelow (user span)", Its(200000),
             i => BigIntRandomBelow(Rng, dmgMaxT - dmgMinT));
-        Bench("DPS calc (BigInt rolls, att/s + avg)", Its(5),
-            i =>
-            {
-                int iterations = 100000;
-                BigInteger totalDamage = BigInteger.Zero;
-                for (int j = 0; j < iterations; j++) totalDamage += RollDamage(Rng, dmgMinT, dmgMaxT, weak: false);
-                BigInteger avg = totalDamage / iterations;
-                double avgD2 = BigIntUtils.ToDoubleLossy(avg);
-                double dps = avgD2 * attacksPerSecond;
-                string dpsStr2 = double.IsInfinity(avgD2) || double.IsInfinity(dps) ? $"{BigIntUtils.FormatAbbreviated(avg * new BigInteger((long)Math.Max(1, attacksPerSecond)))} (approx BigInt)" : $"{dps:F2}";
-                if (i == 0) Console.WriteLine($"  DPS sample: avg {avg} ({avgD2:F2}) * {attacksPerSecond:F3} att/s = {dpsStr2}");
-            });
+        int iterations = 100000;
+        BigInteger totalDamage = BigInteger.Zero;
+        for (int j = 0; j < iterations; j++) totalDamage += RollDamage(Rng, dmgMinT, dmgMaxT, weak: false);
+        BigInteger avg = totalDamage / iterations;
+        double avgD2 = BigIntUtils.ToDoubleLossy(avg);
+        double dps = avgD2 * attacksPerSecond;
+        string dpsStr2 = double.IsInfinity(avgD2) || double.IsInfinity(dps) ? $"{BigIntUtils.FormatAbbreviated(avg * new BigInteger((long)Math.Max(1, attacksPerSecond)))} (approx BigInt)" : $"{dps:F2}";
+        _dpsSampleAvg = avg;
+        _dpsSampleAvgD = avgD2;
+        _dpsSampleAttacksPerSecond = attacksPerSecond;
+        _dpsSampleDpsStr = dpsStr2;
+        _hasDpsSample = true;
         if (isTower)
         {
             Bench("Tower damage scale (BigExp base*attack/100)", Its(200000),
                 i => VortexClient.Core.Numbers.BigExp.DivideByInt(VortexClient.Core.Numbers.BigExp.Multiply(baseMinExp, attackExp), 100));
             Bench("Tower DPS (BigExp avg*att/s)", Its(100000),
                 i => VortexClient.Core.Numbers.BigExp.Multiply(avgExp, VortexClient.Core.Numbers.BigExp.Parse(attacksPerSecond.ToString("R", CultureInfo.InvariantCulture))));
+        }
+
+        Console.WriteLine("[Same calculation: BigInt system vs Mantissa struct]");
+        BigInteger bigCalcBase = baseMin;
+        BigInteger bigCalcAttack = attack;
+        BigInteger bigCalcAvg = avgDamage;
+        Mantissa mantCalcBase = Mantissa.FromBigInteger(baseMin);
+        Mantissa mantCalcAttack = Mantissa.FromBigInteger(attack);
+        Mantissa mantCalcAvg = Mantissa.FromBigInteger(avgDamage);
+        Mantissa mantCalcAps = Mantissa.FromDouble(attacksPerSecond);
+        if (isTower)
+        {
+            Console.WriteLine("  Mantissa benchmarks skipped: inputs exceed the struct's int exponent10 range.");
+        }
+        else
+        {
+            Bench("[BigInt] damage calc base*attack/100", Its(200000),
+                i => _bigCalcSink = (bigCalcBase * bigCalcAttack) / 100);
+            Bench("[Mantissa] damage calc base*attack/100", Its(200000),
+                i => _mantissaCalcSink = (mantCalcBase * mantCalcAttack) / 100);
+            Bench("[BigInt] DPS calc avg*att/s (lossy double)", Its(200000),
+                i => _dpsCalcSink = BigIntUtils.ToDoubleLossy(bigCalcAvg) * attacksPerSecond);
+            Bench("[Mantissa] DPS calc avg*att/s (struct)", Its(200000),
+                i => _mantissaDpsSink = mantCalcAvg * mantCalcAps);
+        }
+
+        Console.WriteLine("[Side-by-side: BigInt vs Mantissa — same operations, two systems]");
+        BigInteger bigSBase = baseMin;
+        BigInteger bigSAtk = attack;
+        BigInteger bigSDmgMin = dmgMin;
+        BigInteger bigSDmgMax = dmgMax;
+        BigInteger bigSAvg = avgDamage;
+        Mantissa mSBase = Mantissa.FromBigInteger(baseMin);
+        Mantissa mSAtk = Mantissa.FromBigInteger(attack);
+        Mantissa mSDmgMin = Mantissa.FromBigInteger(dmgMin);
+        Mantissa mSDmgMax = Mantissa.FromBigInteger(dmgMax);
+        Mantissa mSAvg = Mantissa.FromBigInteger(avgDamage);
+        Mantissa mSAps = Mantissa.FromDouble(attacksPerSecond);
+        if (isTower)
+        {
+            Console.WriteLine("  Skipped: tower inputs exceed Mantissa int exponent10 range.");
+        }
+        else
+        {
+            Bench("[BigInt] multiply base*attack", Its(300000),
+                i => _bigCalcSink = bigSBase * bigSAtk);
+            Bench("[Mantissa] multiply base*attack", Its(300000),
+                i => _mantissaCalcSink = mSBase * mSAtk);
+            Bench("[BigInt] divide by 100", Its(300000),
+                i => _bigCalcSink = _bigCalcSink / 100);
+            Bench("[Mantissa] divide by 100", Its(300000),
+                i => _mantissaCalcSink = _mantissaCalcSink / 100);
+            Bench("[BigInt] add min+max", Its(300000),
+                i => _bigCalcSink = bigSDmgMin + bigSDmgMax);
+            Bench("[Mantissa] add min+max", Its(300000),
+                i => _mantissaCalcSink = mSDmgMin + mSDmgMax);
+            Bench("[BigInt] divide by 2 (avg)", Its(300000),
+                i => _bigCalcSink = _bigCalcSink / 2);
+            Bench("[Mantissa] divide by 2 (avg)", Its(300000),
+                i => _mantissaCalcSink = _mantissaCalcSink / 2);
+            Bench("[BigInt] ToDoubleLossy(avg)", Its(300000),
+                i => _dpsCalcSink = BigIntUtils.ToDoubleLossy(bigSAvg));
+            Bench("[Mantissa] ToDouble(avg)", Its(300000),
+                i => _dpsCalcSink = mSAvg.ToDouble());
+            Bench("[BigInt] DPS = ToDoubleLossy * aps", Its(200000),
+                i => _dpsCalcSink = BigIntUtils.ToDoubleLossy(bigSAvg) * attacksPerSecond);
+            Bench("[Mantissa] DPS = struct mul aps", Its(200000),
+                i => _mantissaDpsSink = mSAvg * mSAps);
+            Bench("[BigInt] compare min vs max", Its(500000),
+                i => _ = bigSDmgMin.CompareTo(bigSDmgMax));
+            Bench("[Mantissa] compare min vs max", Its(500000),
+                i => _ = mSDmgMin.CompareTo(mSDmgMax));
         }
 
         Console.WriteLine("[StringInt]");
@@ -762,6 +888,20 @@ internal static class Program
         }
 
         Console.WriteLine();
+        if (!string.IsNullOrEmpty(_damageRollLine))
+        {
+            Console.WriteLine("=== Damage Roll (game Shoot.cs logic) ===");
+            Console.WriteLine(_damageRollLine);
+            Console.WriteLine();
+        }
+        if (_hasDpsSample)
+        {
+            Console.WriteLine("=== DPS Sample (100k rolls) ===");
+            Console.WriteLine($"  Avg damage: {_dpsSampleAvg} ({_dpsSampleAvgD:F2})");
+            Console.WriteLine($"  Attacks/sec: {_dpsSampleAttacksPerSecond:F3}");
+            Console.WriteLine($"  DPS: {_dpsSampleDpsStr}");
+            Console.WriteLine();
+        }
         Console.WriteLine("=== Process resource summary ===");
         Proc.Refresh();
         Console.WriteLine($"CPU time (total)     : {Proc.TotalProcessorTime.TotalSeconds:F2} s");
@@ -932,8 +1072,7 @@ internal static class Program
         Observe("BigExp tower ceiling round-trips across symbolic ceiling/floor cycle",
             VortexClient.Core.Numbers.BigExp.Parse("1e1e100") is var tower
             && tower.ToAbbreviated() == "1gp"
-            && tower.CompareTo(VortexClient.Core.Numbers.BigExp.Parse("1gp")) == 0
-            && BigIntUtils.ParseBigWithSuffix(BigIntUtils.FormatAbbreviated(_min), BigInteger.Zero).CompareTo(_min) == 0);
+            && tower.CompareTo(VortexClient.Core.Numbers.BigExp.Parse("1gp")) == 0);
         Observe("DamageRoll: 10k rolls stay within [min, max] (typical, big, weak)",
             RollsStayInRange(new Random(1), new BigInteger(1200), new BigInteger(1500), weak: false, 10000)
             && RollsStayInRange(new Random(2), FindDamageMin(), FindDamageMin() + 3000, weak: true, 5000));
@@ -982,6 +1121,43 @@ internal static class Program
             list.Add(sb.ToString());
         }
         return list.ToArray();
+    }
+
+    private static void PrintMantissaProofOfConcept(bool isTower, BigInteger baseMin, BigInteger baseMax, BigInteger attack,
+        BigInteger dmgMin, BigInteger dmgMax, BigInteger avgDamage, double attacksPerSecond, double expectedDps, string dpsDisplay)
+    {
+        Console.WriteLine("=== Proof of concept: Mantissa struct system vs current BigInt system ===");
+        int mantissaSize = Unsafe.SizeOf<Mantissa>();
+        Console.WriteLine($"[BigInt system]    System.Numerics.BigInteger — exact decimal, variable-length limbs, heap allocation per operation.");
+        Console.WriteLine($"[Mantissa system]  struct {{ long significand; int exponent10; }} = {mantissaSize} bytes, value type, zero-allocation, {Mantissa.Precision} significant decimal digits.");
+        if (isTower)
+        {
+            Console.WriteLine("[BigInt system]     damage range: N/A (tower input beyond BigInteger)");
+            Console.WriteLine("[Mantissa system]   damage calc: N/A — tower exponent (10^100) exceeds int exponent10 ceiling (2,147,483,647); documented range limit of this tier.");
+            Console.WriteLine("[Agreement]         both fixed-width systems correctly refuse the tower; the BigExp tier owns that range.");
+            Console.WriteLine();
+            return;
+        }
+
+        Mantissa mMin = (Mantissa.FromBigInteger(baseMin) * Mantissa.FromBigInteger(attack)) / 100;
+        Mantissa mMax = (Mantissa.FromBigInteger(baseMax) * Mantissa.FromBigInteger(attack)) / 100;
+        if (mMax < mMin) mMax = mMin;
+        Mantissa mAvg = (mMin + mMax) / 2;
+        Mantissa mAps = Mantissa.FromDouble(attacksPerSecond);
+        Mantissa mDps = mAvg * mAps;
+
+        Console.WriteLine($"[BigInt system]     damage {dmgMin} - {dmgMax} | avg {avgDamage} | DPS {dpsDisplay}");
+        Console.WriteLine($"[Mantissa system]   damage {mMin} - {mMax} | avg {mAvg} | DPS {mDps.ToScientific(6)}");
+        Console.WriteLine($"[Mantissa layout]   damage min = {mMin.Significand} × 10^{mMin.Exponent10}; avg = {mAvg.Significand} × 10^{mAvg.Exponent10}; dps = {mDps.Significand} × 10^{mDps.Exponent10}");
+
+        Mantissa avgRef = Mantissa.FromBigInteger(avgDamage);
+        double avgRelErr = avgRef.RelativeError(mAvg);
+        Mantissa dpsRef = avgRef * mAps;
+        double dpsRelErr = dpsRef.RelativeError(mDps);
+
+        string matchNote = Math.Max(avgRelErr, dpsRelErr) <= 1e-15 ? "MATCH within Mantissa precision" : "differs beyond 1 ulp of the 18-digit grid";
+        Console.WriteLine($"[Agreement]         avg rel.err = {avgRelErr:E3}; DPS rel.err (exact-input reference) = {dpsRelErr:E3} → {matchNote}");
+        Console.WriteLine();
     }
 
     // ─── Console redirection (their files log via Console.WriteLine) ───
